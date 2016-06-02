@@ -27,7 +27,7 @@ func main() {
 
 	http.HandleFunc("/tiles/", getTiles)
 	http.Handle("/ws", websocket.Handler(wsHandler))
-	http.Handle("/", http.FileServer(http.Dir("public")))
+	http.Handle("/", http.FileServer(http.Dir("frontend/public")))
 
 	err := http.ListenAndServe(":5000", nil)
 	if err != nil {
