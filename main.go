@@ -103,7 +103,7 @@ func wsHandler(ws *websocket.Conn) {
 				l.Latlng = append(l.Latlng, num.(float64))
 			}
 			c.location = l
-			sendMessageToAll(getAllLocations(), &id)
+			sendMessageToAll(message{"updateLocation", l}, &id)
 		default:
 			log.Printf("%+v\n", m.Data)
 		}
@@ -129,10 +129,6 @@ func getAllLocations() message {
 		Action: "allLocations",
 		Data:   &locations,
 	}
-}
-
-func sendLocationUpdate(except *string) {
-
 }
 
 func sendMessageToAll(m message, except *string) {
