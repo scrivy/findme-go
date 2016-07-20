@@ -61,6 +61,7 @@ type location struct {
 type client struct {
 	conn     *websocket.Conn
 	location location
+	id       string
 }
 
 func wsHandler(ws *websocket.Conn) {
@@ -70,13 +71,14 @@ func wsHandler(ws *websocket.Conn) {
 	c := client{
 		conn:     ws,
 		location: location{Id: id},
+		id:       id,
 	}
 	idToConnMapMutex.Lock()
 	idToConnMap[id] = &c
 	idToConnMapMutex.Unlock()
 	log.Printf("%+v\n", idToConnMap)
 
-	sendAllLocations(nil)
+	websocket.JSON.Send(ws, getAllLocations())
 
 	var m message
 	var err error
@@ -101,7 +103,7 @@ func wsHandler(ws *websocket.Conn) {
 				l.Latlng = append(l.Latlng, num.(float64))
 			}
 			c.location = l
-			sendAllLocations(nil)
+			sendMessageToAll(getAllLocations(), &id)
 		default:
 			log.Printf("%+v\n", m.Data)
 		}
@@ -113,25 +115,35 @@ func wsHandler(ws *websocket.Conn) {
 	idToConnMapMutex.Unlock()
 }
 
-func sendAllLocations(except *string) {
-	log.Println("sending all locations")
-
+func getAllLocations() message {
 	locations := make([]location, 0)
-	var clients []*websocket.Conn
-
 	idToConnMapMutex.RLock()
 	for _, c := range idToConnMap {
-		clients = append(clients, c.conn)
 		if c.location.Latlng != nil {
 			locations = append(locations, c.location)
 		}
 	}
 	idToConnMapMutex.RUnlock()
 
-	m := message{
+	return message{
 		Action: "allLocations",
 		Data:   &locations,
 	}
+}
+
+func sendLocationUpdate(except *string) {
+
+}
+
+func sendMessageToAll(m message, except *string) {
+	var clients []*websocket.Conn
+	idToConnMapMutex.RLock()
+	for id, c := range idToConnMap {
+		if except != nil && id != *except {
+			clients = append(clients, c.conn)
+		}
+	}
+	idToConnMapMutex.RUnlock()
 
 	jsonData, err := json.Marshal(m)
 	if err != nil {
