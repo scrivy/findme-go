@@ -29,10 +29,7 @@ func main() {
 	http.Handle("/ws", websocket.Handler(wsHandler))
 	http.Handle("/", http.FileServer(http.Dir("frontend/public")))
 
-	err := http.ListenAndServe(":5000", nil)
-	if err != nil {
-		log.Fatal("ListenAndServe: ", err)
-	}
+	log.Fatal(http.ListenAndServe(":5000", nil))
 }
 
 func connIdGen() {
