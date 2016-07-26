@@ -186,6 +186,6 @@ func getTiles(w http.ResponseWriter, r *http.Request) {
 		log.Println("downloaded " + xyzFile)
 	}
 
-	w.Header().Set("Cache-Control", "max-age:86400, public")
+	w.Header().Set("Cache-Control", "max-age=86400, public")
 	http.ServeFile(w, r, xyzFile)
 }
