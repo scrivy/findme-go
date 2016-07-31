@@ -89,7 +89,7 @@ func wsHandler(ws *websocket.Conn) {
 			break
 		}
 
-		log.Println("Received message:", m.Action)
+		// log.Println("Received message:", m.Action)
 		//		log.Printf("%+v\n", m.Data)
 
 		switch m.Action {
@@ -109,10 +109,10 @@ func wsHandler(ws *websocket.Conn) {
 		}
 	}
 
-	log.Println("Disconnected")
 	idToConnMapMutex.Lock()
 	delete(idToConnMap, id)
 	idToConnMapMutex.Unlock()
+	log.Printf("Disconnected: %d open websockets", len(idToConnMap))
 }
 
 func getAllLocations() message {
