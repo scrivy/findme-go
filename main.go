@@ -62,8 +62,6 @@ type client struct {
 }
 
 func wsHandler(ws *websocket.Conn) {
-	log.Printf("%+v\n", ws)
-
 	id := <-getIdChan
 	c := client{
 		conn:     ws,
@@ -73,7 +71,7 @@ func wsHandler(ws *websocket.Conn) {
 	idToConnMapMutex.Lock()
 	idToConnMap[id] = &c
 	idToConnMapMutex.Unlock()
-	log.Printf("%+v\n", idToConnMap)
+	log.Printf("%d open websockets", len(idToConnMap))
 
 	websocket.JSON.Send(ws, getAllLocations())
 
@@ -82,12 +80,17 @@ func wsHandler(ws *websocket.Conn) {
 	for {
 		err = websocket.JSON.Receive(ws, &m)
 		if err != nil {
-			log.Println(err)
+			switch err {
+			case io.EOF:
+
+			default:
+				log.Println("err = websocket.JSON.Receive(ws, &m):", err)
+			}
 			break
 		}
 
 		log.Println("Received message:", m.Action)
-		log.Printf("%+v\n", m.Data)
+		//		log.Printf("%+v\n", m.Data)
 
 		switch m.Action {
 		case "updateLocation":
@@ -144,9 +147,8 @@ func sendMessageToAll(m message, except *string) {
 		return
 	}
 
-	for i, c := range clients {
+	for _, c := range clients {
 		c.Write(jsonData)
-		log.Printf("sent to client: %d\n", i)
 	}
 }
 
@@ -186,6 +188,6 @@ func getTiles(w http.ResponseWriter, r *http.Request) {
 		log.Println("downloaded " + xyzFile)
 	}
 
-	w.Header().Set("Cache-Control", "max-age=86400, public")
+	w.Header().Set("Cache-Control", "max-age=86400")
 	http.ServeFile(w, r, xyzFile)
 }
