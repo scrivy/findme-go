@@ -7,10 +7,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"regexp"
 	"strconv"
 	"sync"
+	"time"
 
 	"golang.org/x/net/websocket"
 )
@@ -47,6 +49,7 @@ func connIdGen() {
 type message struct {
 	Action string      `json:"action"`
 	Data   interface{} `json:"data"`
+	Date   time.Time
 }
 
 type location struct {
@@ -103,7 +106,12 @@ func wsHandler(ws *websocket.Conn) {
 				l.Latlng = append(l.Latlng, num.(float64))
 			}
 			c.location = l
-			sendMessageToAll(message{"updateLocation", l}, &id)
+			sendMessageToAll(
+				message{
+					"updateLocation",
+					l,
+					time.Now()},
+				&id)
 		default:
 			log.Printf("%+v\n", m.Data)
 		}
