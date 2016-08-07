@@ -11,6 +11,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"time"
@@ -77,13 +78,13 @@ type client struct {
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println(err)
+		logErr(err)
 		return
 	}
 
 	err = websocket.WriteJSON(conn, getAllLocations())
 	if err != nil {
-		log.Println(err)
+		logErr(err)
 	}
 
 	id := <-getIdChan
@@ -105,19 +106,20 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			switch err {
 			case io.EOF:
 			default:
-				log.Println("messageType, r, err := conn.NextReader()", err)
+				switch err.Error() {
+				case "websocket: close 1006 (abnormal closure): unexpected EOF":
+				default:
+					log.Println("conn.NextReader err:", err)
+				}
 			}
 			break
 		}
-
-		// log.Println("Received message:", m.Action)
-		//		log.Printf("%+v\n", m.Data)
 
 		switch messageType {
 		case websocket.TextMessage:
 			jsonBytes, err = ioutil.ReadAll(r)
 			if err != nil {
-				log.Println(err)
+				logErr(err)
 				continue
 			}
 
@@ -158,11 +160,10 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 						time.Now()},
 					&id)
 			default:
-				log.Printf("%+v\n", m.Data)
+				log.Printf("m.Data: %+v\n", m.Data)
 			}
 		default:
-			log.Println("messageType case")
-			log.Printf("%+v\n")
+			log.Printf("messageType: %#v\n", messageType)
 		}
 
 	}
@@ -202,17 +203,25 @@ func sendMessageToAll(m message, except *string) {
 
 	jsonData, err := json.Marshal(m)
 	if err != nil {
-		log.Println(err)
+		logErr(err)
 		return
 	}
 
 	for _, c := range clients {
 		c.writingMutex.Lock()
-		err = c.conn.WriteMessage(websocket.TextMessage, jsonData)
-		c.writingMutex.Unlock()
+		err = c.conn.SetWriteDeadline(time.Now().Add(time.Duration(time.Nanosecond * 100000000)))
 		if err != nil {
-			log.Println(err)
+			logErr(err)
 		}
+		err = c.conn.WriteMessage(websocket.TextMessage, jsonData)
+		if err != nil {
+			logErr(err)
+		}
+		err = c.conn.SetWriteDeadline(time.Time{})
+		if err != nil {
+			logErr(err)
+		}
+		c.writingMutex.Unlock()
 	}
 }
 
@@ -233,18 +242,18 @@ func getTiles(w http.ResponseWriter, r *http.Request) {
 	if _, err := os.Stat(xyzFile); os.IsNotExist(err) {
 		resp, err := http.Get("http://a.tile.thunderforest.com/transport/" + xyz[1] + "/" + xyz[2] + "/" + xyz[3] + ".png")
 		if err != nil {
-			log.Println(err)
+			logErr(err)
 			return
 		}
 		defer resp.Body.Close()
 		err = os.MkdirAll(xyzPath, 0755)
 		if err != nil {
-			log.Println(err)
+			logErr(err)
 			return
 		}
 		out, err := os.Create(xyzFile)
 		if err != nil {
-			log.Println(err)
+			logErr(err)
 			return
 		}
 		io.Copy(out, resp.Body)
@@ -254,4 +263,9 @@ func getTiles(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Cache-Control", "max-age=86400")
 	http.ServeFile(w, r, xyzFile)
+}
+
+func logErr(err error) {
+	log.Println(err)
+	debug.PrintStack()
 }
