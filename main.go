@@ -26,10 +26,7 @@ var (
 	upgrader         = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
-		CheckOrigin: func(r *http.Request) bool {
-			log.Printf("%#v\n", r)
-			return true
-		},
+		CheckOrigin:     func(r *http.Request) bool { return true },
 	}
 )
 
@@ -70,9 +67,12 @@ type location struct {
 }
 
 type client struct {
-	conn     *websocket.Conn
-	location location
-	id       string
+	conn          *websocket.Conn
+	location      location
+	locationMutex sync.RWMutex
+	id            string
+	writingMutex  sync.RWMutex
+	writing       bool
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
@@ -80,6 +80,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Println(err)
 		return
+	}
+
+	err = websocket.WriteJSON(conn, getAllLocations())
+	if err != nil {
+		log.Println(err)
 	}
 
 	id := <-getIdChan
@@ -90,13 +95,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	idToConnMapMutex.Lock()
 	idToConnMap[id] = &c
-	idToConnMapMutex.Unlock()
 	log.Printf("%d open websockets", len(idToConnMap))
-
-	err = websocket.WriteJSON(conn, getAllLocations())
-	if err != nil {
-		log.Println(err)
-	}
+	idToConnMapMutex.Unlock()
 
 	var m message
 	var jsonBytes []byte
@@ -127,14 +127,31 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			switch m.Action {
 			case "updateLocation":
 				data := m.Data.(map[string]interface{})
+				latlng, ok := data["latlng"].([]interface{})
+				if !ok || len(latlng) != 2 {
+					continue
+				}
+				lat, ok := latlng[0].(float64)
+				if !ok {
+					continue
+				}
+				lng, ok := latlng[1].(float64)
+				if !ok {
+					continue
+				}
+				accuracy, ok := data["accuracy"].(float64)
+				if !ok {
+					continue
+				}
+
 				l := location{
 					Id:       id,
-					Accuracy: data["accuracy"].(float64),
+					Accuracy: accuracy,
+					Latlng:   []float64{lat, lng},
 				}
-				for _, num := range data["latlng"].([]interface{}) {
-					l.Latlng = append(l.Latlng, num.(float64))
-				}
+				c.locationMutex.Lock()
 				c.location = l
+				c.locationMutex.Unlock()
 				sendMessageToAll(
 					message{
 						"updateLocation",
@@ -153,8 +170,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	idToConnMapMutex.Lock()
 	delete(idToConnMap, id)
-	idToConnMapMutex.Unlock()
 	log.Printf("Disconnected: %d open websockets", len(idToConnMap))
+	idToConnMapMutex.Unlock()
 }
 
 func getAllLocations() message {
@@ -175,11 +192,19 @@ func getAllLocations() message {
 }
 
 func sendMessageToAll(m message, except *string) {
-	var clients []*websocket.Conn
+	var clients []*client
 	idToConnMapMutex.RLock()
+	var writing bool
 	for id, c := range idToConnMap {
 		if except != nil && id != *except {
-			clients = append(clients, c.conn)
+			c.writingMutex.RLock()
+			writing = c.writing
+			c.writingMutex.RUnlock()
+			if !writing {
+				clients = append(clients, c)
+			} else {
+				log.Println("blocked")
+			}
 		}
 	}
 	idToConnMapMutex.RUnlock()
@@ -190,8 +215,16 @@ func sendMessageToAll(m message, except *string) {
 		return
 	}
 
-	for _, conn := range clients {
-		err = conn.WriteMessage(websocket.TextMessage, jsonData)
+	for _, c := range clients {
+		c.writingMutex.RLock()
+		writing = c.writing
+		c.writingMutex.RUnlock()
+		if writing {
+			continue
+		}
+		c.writingMutex.Lock()
+		err = c.conn.WriteMessage(websocket.TextMessage, jsonData)
+		c.writingMutex.Unlock()
 		if err != nil {
 			log.Println(err)
 		}
