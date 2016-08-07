@@ -71,8 +71,7 @@ type client struct {
 	location      location
 	locationMutex sync.RWMutex
 	id            string
-	writingMutex  sync.RWMutex
-	writing       bool
+	writingMutex  sync.Mutex
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
@@ -194,17 +193,9 @@ func getAllLocations() message {
 func sendMessageToAll(m message, except *string) {
 	var clients []*client
 	idToConnMapMutex.RLock()
-	var writing bool
 	for id, c := range idToConnMap {
 		if except != nil && id != *except {
-			c.writingMutex.RLock()
-			writing = c.writing
-			c.writingMutex.RUnlock()
-			if !writing {
-				clients = append(clients, c)
-			} else {
-				log.Println("blocked")
-			}
+			clients = append(clients, c)
 		}
 	}
 	idToConnMapMutex.RUnlock()
@@ -216,12 +207,6 @@ func sendMessageToAll(m message, except *string) {
 	}
 
 	for _, c := range clients {
-		c.writingMutex.RLock()
-		writing = c.writing
-		c.writingMutex.RUnlock()
-		if writing {
-			continue
-		}
 		c.writingMutex.Lock()
 		err = c.conn.WriteMessage(websocket.TextMessage, jsonData)
 		c.writingMutex.Unlock()
