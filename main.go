@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -14,13 +15,19 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/websocket"
+	"github.com/gorilla/websocket"
 )
 
-var xyzRegex *regexp.Regexp
-var getIdChan chan string
-var idToConnMap map[string]*client
-var idToConnMapMutex sync.RWMutex
+var (
+	xyzRegex         *regexp.Regexp
+	getIdChan        chan string
+	idToConnMap      map[string]*client
+	idToConnMapMutex sync.RWMutex
+	upgrader         = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+	}
+)
 
 func main() {
 	xyzRegex = regexp.MustCompile(`^\/tiles\/(\d+)\/(\d+)\/(\d+)\.png$`)
@@ -28,7 +35,7 @@ func main() {
 	go connIdGen()
 
 	http.HandleFunc("/tiles/", getTiles)
-	http.Handle("/ws", websocket.Handler(wsHandler))
+	http.HandleFunc("/ws", wsHandler)
 	http.Handle("/", http.FileServer(http.Dir("frontend/public")))
 
 	log.Fatal(http.ListenAndServe(":5000", nil))
@@ -64,10 +71,16 @@ type client struct {
 	id       string
 }
 
-func wsHandler(ws *websocket.Conn) {
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
 	id := <-getIdChan
 	c := client{
-		conn:     ws,
+		conn:     conn,
 		location: location{Id: id},
 		id:       id,
 	}
@@ -76,18 +89,20 @@ func wsHandler(ws *websocket.Conn) {
 	idToConnMapMutex.Unlock()
 	log.Printf("%d open websockets", len(idToConnMap))
 
-	websocket.JSON.Send(ws, getAllLocations())
+	err = websocket.WriteJSON(conn, getAllLocations())
+	if err != nil {
+		log.Println(err)
+	}
 
 	var m message
-	var err error
+	var jsonBytes []byte
 	for {
-		err = websocket.JSON.Receive(ws, &m)
+		messageType, r, err := conn.NextReader()
 		if err != nil {
 			switch err {
 			case io.EOF:
-
 			default:
-				log.Println("err = websocket.JSON.Receive(ws, &m):", err)
+				log.Println("messageType, r, err := conn.NextReader()", err)
 			}
 			break
 		}
@@ -95,26 +110,41 @@ func wsHandler(ws *websocket.Conn) {
 		// log.Println("Received message:", m.Action)
 		//		log.Printf("%+v\n", m.Data)
 
-		switch m.Action {
-		case "updateLocation":
-			data := m.Data.(map[string]interface{})
-			l := location{
-				Id:       id,
-				Accuracy: data["accuracy"].(float64),
+		switch messageType {
+		case websocket.TextMessage:
+			jsonBytes, err = ioutil.ReadAll(r)
+			if err != nil {
+				log.Println(err)
+				continue
 			}
-			for _, num := range data["latlng"].([]interface{}) {
-				l.Latlng = append(l.Latlng, num.(float64))
+
+			json.Unmarshal(jsonBytes, &m)
+
+			switch m.Action {
+			case "updateLocation":
+				data := m.Data.(map[string]interface{})
+				l := location{
+					Id:       id,
+					Accuracy: data["accuracy"].(float64),
+				}
+				for _, num := range data["latlng"].([]interface{}) {
+					l.Latlng = append(l.Latlng, num.(float64))
+				}
+				c.location = l
+				sendMessageToAll(
+					message{
+						"updateLocation",
+						l,
+						time.Now()},
+					&id)
+			default:
+				log.Printf("%+v\n", m.Data)
 			}
-			c.location = l
-			sendMessageToAll(
-				message{
-					"updateLocation",
-					l,
-					time.Now()},
-				&id)
 		default:
-			log.Printf("%+v\n", m.Data)
+			log.Println("messageType case")
+			log.Printf("%+v\n")
 		}
+
 	}
 
 	idToConnMapMutex.Lock()
@@ -136,6 +166,7 @@ func getAllLocations() message {
 	return message{
 		Action: "allLocations",
 		Data:   &locations,
+		Date:   time.Now(),
 	}
 }
 
@@ -155,8 +186,11 @@ func sendMessageToAll(m message, except *string) {
 		return
 	}
 
-	for _, c := range clients {
-		c.Write(jsonData)
+	for _, conn := range clients {
+		err = conn.WriteMessage(websocket.TextMessage, jsonData)
+		if err != nil {
+			log.Println(err)
+		}
 	}
 }
 
