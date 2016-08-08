@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -104,7 +105,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		messageType, r, err := conn.NextReader()
 		if err != nil {
 			switch err {
-			case io.EOF:
+			//			case io.EOF:
 			default:
 				switch err.Error() {
 				case "websocket: close 1006 (abnormal closure): unexpected EOF":
@@ -207,15 +208,25 @@ func sendMessageToAll(m message, except *string) {
 		return
 	}
 
+	//	stopAfter := time.Now().Add(time.Duration(len(clients)/50) * time.Second)
+
 	for _, c := range clients {
+		//		if time.Now().After(stopAfter) {
+		//			log.Println("breaking out of sendMessageToAll")
+		//			break
+		//		}
 		c.writingMutex.Lock()
-		err = c.conn.SetWriteDeadline(time.Now().Add(time.Duration(time.Nanosecond * 100000000)))
+		err = c.conn.SetWriteDeadline(time.Now().Add(time.Duration(time.Second)))
 		if err != nil {
 			logErr(err)
 		}
 		err = c.conn.WriteMessage(websocket.TextMessage, jsonData)
 		if err != nil {
-			logErr(err)
+			if strings.Contains(err.Error(), "i/o timeout") {
+				log.Println(err)
+			} else {
+				logErr(err)
+			}
 		}
 		err = c.conn.SetWriteDeadline(time.Time{})
 		if err != nil {
