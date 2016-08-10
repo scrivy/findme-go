@@ -74,6 +74,56 @@ type client struct {
 	locationMutex sync.RWMutex
 	id            string
 	writingMutex  sync.Mutex
+	queue         []location
+	queueLock     sync.Mutex
+	closeChan     chan bool
+}
+
+func (c *client) send(m *[]byte) {
+	c.writingMutex.Lock()
+	defer c.writingMutex.Unlock()
+	err := c.conn.SetWriteDeadline(time.Now().Add(time.Duration(time.Second)))
+	if err != nil {
+		logErr(err)
+	}
+	err = c.conn.WriteMessage(websocket.TextMessage, *m)
+	if err != nil {
+		if strings.Contains(err.Error(), "i/o timeout") {
+			log.Println(err)
+		} else if strings.Contains(err.Error(), "write: broken pipe") {
+			log.Println(err)
+		} else {
+			logErr(err)
+		}
+		close(c.closeChan)
+		return
+	}
+	err = c.conn.SetWriteDeadline(time.Time{})
+	if err != nil {
+		logErr(err)
+	}
+}
+
+func (c *client) flushQueue() {
+	c.queueLock.Lock()
+	jsonBytes, err := json.Marshal(message{
+		Action: "allLocations",
+		Data:   c.queue,
+		Date:   time.Now(),
+	})
+	c.queue = make([]location, 0)
+	c.queueLock.Unlock()
+	if err != nil {
+		logErr(err)
+		return
+	}
+	c.send(&jsonBytes)
+}
+
+func (c *client) enqueue(l location) {
+	c.queueLock.Lock()
+	c.queue = append(c.queue, l)
+	c.queueLock.Unlock()
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
@@ -90,14 +140,28 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	id := <-getIdChan
 	c := client{
-		conn:     conn,
-		location: location{Id: id},
-		id:       id,
+		conn:      conn,
+		location:  location{Id: id},
+		id:        id,
+		closeChan: make(chan bool),
 	}
 	idToConnMapMutex.Lock()
 	idToConnMap[id] = &c
 	log.Printf("%d open websockets", len(idToConnMap))
 	idToConnMapMutex.Unlock()
+
+	go func(c *client) {
+		ticker := time.NewTicker(time.Second)
+		for {
+			select {
+			case <-ticker.C:
+				c.flushQueue()
+			case <-c.closeChan:
+				log.Println("closing chan")
+				return
+			}
+		}
+	}(&c)
 
 	var m message
 	var jsonBytes []byte
@@ -154,12 +218,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				c.locationMutex.Lock()
 				c.location = l
 				c.locationMutex.Unlock()
-				sendMessageToAll(
-					message{
-						"updateLocation",
-						l,
-						time.Now()},
-					&id)
+				sendLocationToAll(l, &id)
 			default:
 				log.Printf("m.Data: %+v\n", m.Data)
 			}
@@ -192,7 +251,7 @@ func getAllLocations() message {
 	}
 }
 
-func sendMessageToAll(m message, except *string) {
+func sendLocationToAll(l location, except *string) {
 	var clients []*client
 	idToConnMapMutex.RLock()
 	for id, c := range idToConnMap {
@@ -202,37 +261,8 @@ func sendMessageToAll(m message, except *string) {
 	}
 	idToConnMapMutex.RUnlock()
 
-	jsonData, err := json.Marshal(m)
-	if err != nil {
-		logErr(err)
-		return
-	}
-
-	//	stopAfter := time.Now().Add(time.Duration(len(clients)/50) * time.Second)
-
 	for _, c := range clients {
-		//		if time.Now().After(stopAfter) {
-		//			log.Println("breaking out of sendMessageToAll")
-		//			break
-		//		}
-		c.writingMutex.Lock()
-		err = c.conn.SetWriteDeadline(time.Now().Add(time.Duration(time.Second)))
-		if err != nil {
-			logErr(err)
-		}
-		err = c.conn.WriteMessage(websocket.TextMessage, jsonData)
-		if err != nil {
-			if strings.Contains(err.Error(), "i/o timeout") {
-				log.Println(err)
-			} else {
-				logErr(err)
-			}
-		}
-		err = c.conn.SetWriteDeadline(time.Time{})
-		if err != nil {
-			logErr(err)
-		}
-		c.writingMutex.Unlock()
+		c.enqueue(l)
 	}
 }
 
