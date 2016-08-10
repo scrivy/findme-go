@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/md5"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -106,18 +107,24 @@ func (c *client) send(m *[]byte) {
 
 func (c *client) flushQueue() {
 	c.queueLock.Lock()
-	jsonBytes, err := json.Marshal(message{
-		Action: "allLocations",
-		Data:   c.queue,
-		Date:   time.Now(),
-	})
-	c.queue = make([]location, 0)
+	var err error
+	var jsonBytes []byte
+	if len(c.queue) > 0 {
+		jsonBytes, err = json.Marshal(message{
+			Action: "allLocations",
+			Data:   c.queue,
+			Date:   time.Now(),
+		})
+		c.queue = make([]location, 0)
+	}
 	c.queueLock.Unlock()
 	if err != nil {
 		logErr(err)
 		return
 	}
-	c.send(&jsonBytes)
+	if binary.Size(jsonBytes) > 0 {
+		c.send(&jsonBytes)
+	}
 }
 
 func (c *client) enqueue(l location) {
