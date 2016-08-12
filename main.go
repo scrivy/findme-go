@@ -75,7 +75,7 @@ type client struct {
 	locationMutex sync.RWMutex
 	id            string
 	writingMutex  sync.Mutex
-	queue         []location
+	queue         map[string]location
 	queueLock     sync.Mutex
 	closeChan     chan bool
 }
@@ -110,12 +110,16 @@ func (c *client) flushQueue() {
 	var err error
 	var jsonBytes []byte
 	if len(c.queue) > 0 {
+		locations := []location{}
+		for _, l := range c.queue {
+			locations = append(locations, l)
+		}
 		jsonBytes, err = json.Marshal(message{
 			Action: "allLocations",
-			Data:   c.queue,
+			Data:   locations,
 			Date:   time.Now(),
 		})
-		c.queue = make([]location, 0)
+		c.queue = make(map[string]location)
 	}
 	c.queueLock.Unlock()
 	if err != nil {
@@ -129,7 +133,7 @@ func (c *client) flushQueue() {
 
 func (c *client) enqueue(l location) {
 	c.queueLock.Lock()
-	c.queue = append(c.queue, l)
+	c.queue[l.Id] = l
 	c.queueLock.Unlock()
 }
 
@@ -151,6 +155,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		location:  location{Id: id},
 		id:        id,
 		closeChan: make(chan bool),
+		queue:     make(map[string]location),
 	}
 	idToConnMapMutex.Lock()
 	idToConnMap[id] = &c
