@@ -161,10 +161,10 @@ func (c *client) ping() {
 		if err != nil {
 			switch err {
 			case websocket.ErrCloseSent:
-				c.close()
 			default:
 				logErr(err)
 			}
+			c.close()
 		}
 	}
 }
