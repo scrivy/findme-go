@@ -36,8 +36,8 @@ var (
 func main() {
 	xyzRegex = regexp.MustCompile(`^\/tiles\/(\d+)\/(\d+)\/(\d+)\.png$`)
 	idToConnMap = make(map[string]*client)
+	getIdChan = make(chan string)
 	go func() { // connIdGen
-		getIdChan = make(chan string)
 		var id string
 		count := 0
 		for {
@@ -52,32 +52,49 @@ func main() {
 	http.HandleFunc("/ws", wsHandler)
 	http.Handle("/", http.FileServer(http.Dir("frontend/public")))
 
-	go log.Fatal(http.ListenAndServe(":5000", nil))
+	go func() {
+		log.Fatal(http.ListenAndServe(":5000", nil))
+	}()
 
 	pingTicker := time.NewTicker(time.Duration(5) * time.Second)
 	rmOldWsConnsTicker := time.NewTicker(time.Duration(10) * time.Minute)
 	var lastCheck time.Time
+	var clients []*client
 	for {
 		select {
 		case <-pingTicker.C:
+			clients = make([]*client, 0)
 			idToConnMapMutex.RLock()
 			for _, c := range idToConnMap {
-				if !c.wsClosed {
-					go c.ping()
-				}
+				clients = append(clients, c)
 			}
 			idToConnMapMutex.RUnlock()
+
+			for _, c := range clients {
+				go c.ping()
+			}
 		case <-rmOldWsConnsTicker.C:
-			idToConnMapMutex.Lock()
-			for id, c := range idToConnMap {
-				if c.lastRxMessage.Before(lastCheck) {
-					c.close()
+			clients = make([]*client, 0)
+			idToConnMapMutex.RLock()
+			for _, c := range idToConnMap {
+				clients = append(clients, c)
+			}
+			idToConnMapMutex.RUnlock()
+
+			var lastRxMessage time.Time
+			for _, c := range clients {
+				c.mutex.RLock()
+				lastRxMessage = c.lastRxMessage
+				c.mutex.RUnlock()
+				if lastRxMessage.Before(lastCheck) {
+					idToConnMapMutex.Lock()
 					delete(idToConnMap, c.id)
-					log.Println("removed stale client: ", id)
+					idToConnMapMutex.Unlock()
+					go c.close()
+					log.Println("removed stale client: ", c.id)
 					log.Printf("%v clients connected\n", len(idToConnMap))
 				}
 			}
-			idToConnMapMutex.Unlock()
 			lastCheck = time.Now()
 		}
 	}
@@ -99,11 +116,11 @@ type client struct {
 	conn          *websocket.Conn
 	wsClosed      bool
 	location      location
-	locationMutex sync.RWMutex
-	id            string
+	mutex         sync.RWMutex
 	writingMutex  sync.Mutex
+	id            string
 	queue         map[string]location
-	queueLock     sync.Mutex
+	enqueue       chan location
 	closeChan     chan bool
 	lastRxMessage time.Time
 }
@@ -136,26 +153,38 @@ func (c *client) send(m *[]byte) {
 }
 
 func (c *client) ping() {
-	err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(time.Second))
-	if err != nil {
-		switch err {
-		case websocket.ErrCloseSent:
-			c.close()
-		default:
-			logErr(err)
+	c.mutex.RLock()
+	wsClosed := c.wsClosed
+	c.mutex.RUnlock()
+	if !wsClosed {
+		err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(time.Second))
+		if err != nil {
+			switch err {
+			case websocket.ErrCloseSent:
+				c.close()
+			default:
+				logErr(err)
+			}
 		}
 	}
 }
 
 func (c *client) close() {
-	c.wsClosed = true
-	close(c.closeChan)
-	c.conn.Close()
+	c.mutex.RLock()
+	wsClosed := c.wsClosed
+	c.mutex.RUnlock()
+	if !wsClosed {
+		c.mutex.Lock()
+		c.wsClosed = true
+		c.mutex.Unlock()
+		close(c.closeChan)
+		c.conn.Close()
+	}
 }
 
 func (c *client) flushQueue() {
+	c.mutex.Lock()
 	if !c.wsClosed {
-		c.queueLock.Lock()
 		var err error
 		var jsonBytes []byte
 		if len(c.queue) > 0 {
@@ -170,7 +199,6 @@ func (c *client) flushQueue() {
 			})
 			c.queue = make(map[string]location)
 		}
-		c.queueLock.Unlock()
 		if err != nil {
 			logErr(err)
 			return
@@ -179,17 +207,14 @@ func (c *client) flushQueue() {
 			c.send(&jsonBytes)
 		}
 	}
-}
-
-func (c *client) enqueue(l location) {
-	c.queueLock.Lock()
-	c.queue[l.Id] = l
-	c.queueLock.Unlock()
+	c.mutex.Unlock()
 }
 
 func connPongHandler(c *client) func(string) error {
 	return func(appData string) error {
+		c.mutex.Lock()
 		c.lastRxMessage = time.Now()
+		c.mutex.Unlock()
 		return nil
 	}
 }
@@ -212,6 +237,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		location:      location{Id: id},
 		id:            id,
 		closeChan:     make(chan bool),
+		enqueue:       make(chan location),
 		queue:         make(map[string]location),
 		lastRxMessage: time.Now(),
 	}
@@ -228,6 +254,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			select {
 			case <-ticker.C:
 				c.flushQueue()
+			case l := <-c.enqueue:
+				c.queue[l.Id] = l
 			case <-c.closeChan:
 				return
 			}
@@ -289,9 +317,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 					Accuracy: accuracy,
 					Latlng:   []float64{lat, lng},
 				}
-				c.locationMutex.Lock()
+				c.mutex.Lock()
 				c.location = l
-				c.locationMutex.Unlock()
+				c.mutex.Unlock()
 				sendLocationToAll(l, &id)
 			default:
 				log.Printf("m.Data: %+v\n", m.Data)
@@ -299,24 +327,25 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		default:
 			log.Printf("messageType: %#v\n", messageType)
 		}
-
 	}
-
-	//	idToConnMapMutex.Lock()
-	//	delete(idToConnMap, id)
-	//	log.Printf("Disconnected: %d open websockets", len(idToConnMap))
-	//	idToConnMapMutex.Unlock()
 }
 
 func getAllLocations() message {
-	locations := make([]location, 0)
+	clients := make([]*client, 0)
 	idToConnMapMutex.RLock()
 	for _, c := range idToConnMap {
+		clients = append(clients, c)
+	}
+	idToConnMapMutex.RUnlock()
+
+	locations := make([]location, 0)
+	for _, c := range clients {
+		c.mutex.RLock()
 		if c.location.Latlng != nil {
 			locations = append(locations, c.location)
 		}
+		c.mutex.RUnlock()
 	}
-	idToConnMapMutex.RUnlock()
 
 	return message{
 		Action: "allLocations",
@@ -336,7 +365,7 @@ func sendLocationToAll(l location, except *string) {
 	idToConnMapMutex.RUnlock()
 
 	for _, c := range clients {
-		c.enqueue(l)
+		c.enqueue <- l
 	}
 }
 
