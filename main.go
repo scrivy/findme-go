@@ -36,15 +36,23 @@ var (
 func main() {
 	xyzRegex = regexp.MustCompile(`^\/tiles\/(\d+)\/(\d+)\/(\d+)\.png$`)
 	idToConnMap = make(map[string]*client)
-	go connIdGen()
+	go func() { // connIdGen
+		getIdChan = make(chan string)
+		var id string
+		count := 0
+		for {
+			md5Sum := md5.Sum([]byte(strconv.Itoa(count)))
+			id = hex.EncodeToString(md5Sum[:])
+			getIdChan <- id
+			count++
+		}
+	}()
 
 	http.HandleFunc("/tiles/", getTiles)
 	http.HandleFunc("/ws", wsHandler)
 	http.Handle("/", http.FileServer(http.Dir("frontend/public")))
 
-	go func() {
-		log.Fatal(http.ListenAndServe(":5000", nil))
-	}()
+	go log.Fatal(http.ListenAndServe(":5000", nil))
 
 	pingTicker := time.NewTicker(time.Duration(5) * time.Second)
 	rmOldWsConnsTicker := time.NewTicker(time.Duration(10) * time.Minute)
@@ -54,9 +62,9 @@ func main() {
 		case <-pingTicker.C:
 			idToConnMapMutex.RLock()
 			for _, c := range idToConnMap {
-				go func() {
-					c.ping()
-				}()
+				if !c.wsClosed {
+					go c.ping()
+				}
 			}
 			idToConnMapMutex.RUnlock()
 		case <-rmOldWsConnsTicker.C:
@@ -75,18 +83,6 @@ func main() {
 	}
 }
 
-func connIdGen() {
-	getIdChan = make(chan string)
-	var id string
-	count := 0
-	for {
-		md5Sum := md5.Sum([]byte(strconv.Itoa(count)))
-		id = hex.EncodeToString(md5Sum[:])
-		getIdChan <- id
-		count++
-	}
-}
-
 type message struct {
 	Action string      `json:"action"`
 	Data   interface{} `json:"data"`
@@ -101,6 +97,7 @@ type location struct {
 
 type client struct {
 	conn          *websocket.Conn
+	wsClosed      bool
 	location      location
 	locationMutex sync.RWMutex
 	id            string
@@ -112,23 +109,29 @@ type client struct {
 }
 
 func (c *client) send(m *[]byte) {
-	c.writingMutex.Lock()
-	defer c.writingMutex.Unlock()
-	err := c.conn.SetWriteDeadline(time.Now().Add(time.Duration(time.Second)))
-	if err != nil {
-		logErr(err)
-		return
-	}
-	err = c.conn.WriteMessage(websocket.TextMessage, *m)
-	if err != nil {
-		if strings.Contains(err.Error(), "i/o timeout") {
-			log.Println(err)
-		} else if strings.Contains(err.Error(), "write: broken pipe") {
-			log.Println(err)
-		} else {
+	if !c.wsClosed {
+		c.writingMutex.Lock()
+		defer c.writingMutex.Unlock()
+		err := c.conn.SetWriteDeadline(time.Now().Add(time.Duration(time.Second)))
+		if err != nil {
 			logErr(err)
+			return
 		}
-		return
+		err = c.conn.WriteMessage(websocket.TextMessage, *m)
+		if err != nil {
+			switch err {
+			case websocket.ErrCloseSent:
+				c.close()
+			default:
+				if strings.Contains(err.Error(), "i/o timeout") {
+					log.Println(err)
+				} else if strings.Contains(err.Error(), "write: broken pipe") {
+					log.Println(err)
+				} else {
+					logErr(err)
+				}
+			}
+		}
 	}
 }
 
@@ -137,6 +140,7 @@ func (c *client) ping() {
 	if err != nil {
 		switch err {
 		case websocket.ErrCloseSent:
+			c.close()
 		default:
 			logErr(err)
 		}
@@ -144,33 +148,36 @@ func (c *client) ping() {
 }
 
 func (c *client) close() {
+	c.wsClosed = true
 	close(c.closeChan)
 	c.conn.Close()
 }
 
 func (c *client) flushQueue() {
-	c.queueLock.Lock()
-	var err error
-	var jsonBytes []byte
-	if len(c.queue) > 0 {
-		locations := []location{}
-		for _, l := range c.queue {
-			locations = append(locations, l)
+	if !c.wsClosed {
+		c.queueLock.Lock()
+		var err error
+		var jsonBytes []byte
+		if len(c.queue) > 0 {
+			locations := []location{}
+			for _, l := range c.queue {
+				locations = append(locations, l)
+			}
+			jsonBytes, err = json.Marshal(message{
+				Action: "allLocations",
+				Data:   locations,
+				Date:   time.Now(),
+			})
+			c.queue = make(map[string]location)
 		}
-		jsonBytes, err = json.Marshal(message{
-			Action: "allLocations",
-			Data:   locations,
-			Date:   time.Now(),
-		})
-		c.queue = make(map[string]location)
-	}
-	c.queueLock.Unlock()
-	if err != nil {
-		logErr(err)
-		return
-	}
-	if binary.Size(jsonBytes) > 0 {
-		c.send(&jsonBytes)
+		c.queueLock.Unlock()
+		if err != nil {
+			logErr(err)
+			return
+		}
+		if binary.Size(jsonBytes) > 0 {
+			c.send(&jsonBytes)
+		}
 	}
 }
 
