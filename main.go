@@ -162,7 +162,11 @@ func (c *client) ping() {
 			switch err {
 			case websocket.ErrCloseSent:
 			default:
-				logErr(err)
+				if strings.Contains(err.Error(), "write: broken pipe") {
+					log.Println(err)
+				} else {
+					logErr(err)
+				}
 			}
 			c.close()
 		}
