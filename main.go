@@ -42,7 +42,37 @@ func main() {
 	http.HandleFunc("/ws", wsHandler)
 	http.Handle("/", http.FileServer(http.Dir("frontend/public")))
 
-	log.Fatal(http.ListenAndServe(":5000", nil))
+	go func() {
+		log.Fatal(http.ListenAndServe(":5000", nil))
+	}()
+
+	pingTicker := time.NewTicker(time.Duration(5) * time.Second)
+	rmOldWsConnsTicker := time.NewTicker(time.Duration(10) * time.Minute)
+	var lastCheck time.Time
+	for {
+		select {
+		case <-pingTicker.C:
+			idToConnMapMutex.RLock()
+			for _, c := range idToConnMap {
+				go func() {
+					c.ping()
+				}()
+			}
+			idToConnMapMutex.RUnlock()
+		case <-rmOldWsConnsTicker.C:
+			idToConnMapMutex.Lock()
+			for id, c := range idToConnMap {
+				if c.lastRxMessage.Before(lastCheck) {
+					c.close()
+					delete(idToConnMap, c.id)
+					log.Println("removed stale client: ", id)
+					log.Printf("%v clients connected\n", len(idToConnMap))
+				}
+			}
+			idToConnMapMutex.Unlock()
+			lastCheck = time.Now()
+		}
+	}
 }
 
 func connIdGen() {
@@ -78,6 +108,7 @@ type client struct {
 	queue         map[string]location
 	queueLock     sync.Mutex
 	closeChan     chan bool
+	lastRxMessage time.Time
 }
 
 func (c *client) send(m *[]byte) {
@@ -86,6 +117,7 @@ func (c *client) send(m *[]byte) {
 	err := c.conn.SetWriteDeadline(time.Now().Add(time.Duration(time.Second)))
 	if err != nil {
 		logErr(err)
+		return
 	}
 	err = c.conn.WriteMessage(websocket.TextMessage, *m)
 	if err != nil {
@@ -96,13 +128,24 @@ func (c *client) send(m *[]byte) {
 		} else {
 			logErr(err)
 		}
-		close(c.closeChan)
 		return
 	}
-	err = c.conn.SetWriteDeadline(time.Time{})
+}
+
+func (c *client) ping() {
+	err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(time.Second))
 	if err != nil {
-		logErr(err)
+		switch err {
+		case websocket.ErrCloseSent:
+		default:
+			logErr(err)
+		}
 	}
+}
+
+func (c *client) close() {
+	close(c.closeChan)
+	c.conn.Close()
 }
 
 func (c *client) flushQueue() {
@@ -137,6 +180,13 @@ func (c *client) enqueue(l location) {
 	c.queueLock.Unlock()
 }
 
+func connPongHandler(c *client) func(string) error {
+	return func(appData string) error {
+		c.lastRxMessage = time.Now()
+		return nil
+	}
+}
+
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -151,12 +201,14 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	id := <-getIdChan
 	c := client{
-		conn:      conn,
-		location:  location{Id: id},
-		id:        id,
-		closeChan: make(chan bool),
-		queue:     make(map[string]location),
+		conn:          conn,
+		location:      location{Id: id},
+		id:            id,
+		closeChan:     make(chan bool),
+		queue:         make(map[string]location),
+		lastRxMessage: time.Now(),
 	}
+	conn.SetPongHandler(connPongHandler(&c))
 	idToConnMapMutex.Lock()
 	idToConnMap[id] = &c
 	log.Printf("%d open websockets", len(idToConnMap))
@@ -164,12 +216,12 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	go func(c *client) {
 		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
 				c.flushQueue()
 			case <-c.closeChan:
-				log.Println("closing chan")
 				return
 			}
 		}
@@ -189,8 +241,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 					log.Println("conn.NextReader err:", err)
 				}
 			}
+			conn.Close()
 			break
 		}
+
+		c.lastRxMessage = time.Now()
 
 		switch messageType {
 		case websocket.TextMessage:
@@ -240,10 +295,10 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	idToConnMapMutex.Lock()
-	delete(idToConnMap, id)
-	log.Printf("Disconnected: %d open websockets", len(idToConnMap))
-	idToConnMapMutex.Unlock()
+	//	idToConnMapMutex.Lock()
+	//	delete(idToConnMap, id)
+	//	log.Printf("Disconnected: %d open websockets", len(idToConnMap))
+	//	idToConnMapMutex.Unlock()
 }
 
 func getAllLocations() message {
