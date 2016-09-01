@@ -22,9 +22,9 @@ import (
 )
 
 var (
-	xyzRegex         *regexp.Regexp
-	getIdChan        chan string
-	idToConnMap      map[string]*client
+	xyzRegex         *regexp.Regexp     = regexp.MustCompile(`^\/tiles\/(\d+)\/(\d+)\/(\d+)\.png$`)
+	getIdChan        chan string        = make(chan string)
+	idToConnMap      map[string]*client = make(map[string]*client)
 	idToConnMapMutex sync.RWMutex
 	upgrader         = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -34,9 +34,6 @@ var (
 )
 
 func main() {
-	xyzRegex = regexp.MustCompile(`^\/tiles\/(\d+)\/(\d+)\/(\d+)\.png$`)
-	idToConnMap = make(map[string]*client)
-	getIdChan = make(chan string)
 	go func() { // connIdGen
 		var id string
 		count := 0
