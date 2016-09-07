@@ -56,20 +56,15 @@ func main() {
 	pingTicker := time.NewTicker(time.Duration(5) * time.Second)
 	rmOldWsConnsTicker := time.NewTicker(time.Duration(10) * time.Minute)
 	var lastCheck time.Time
-	var clients []*client
 	var lastRxMessage time.Time
 	for {
 		select {
 		case <-pingTicker.C:
-			clients = getAllClients()
-
-			for _, c := range clients {
+			for _, c := range getAllClients() {
 				go c.ping()
 			}
 		case <-rmOldWsConnsTicker.C:
-			clients = getAllClients()
-
-			for _, c := range clients {
+			for _, c := range getAllClients() {
 				c.mutex.RLock()
 				lastRxMessage = c.lastRxMessage
 				c.mutex.RUnlock()
@@ -90,7 +85,6 @@ func main() {
 type message struct {
 	Action string      `json:"action"`
 	Data   interface{} `json:"data"`
-	Date   time.Time
 }
 
 type location struct {
@@ -186,7 +180,6 @@ func (c *client) flushQueue() {
 			jsonBytes, err = json.Marshal(message{
 				Action: "allLocations",
 				Data:   locations,
-				Date:   time.Now(),
 			})
 			c.queue = make(map[string]location)
 		}
@@ -221,7 +214,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	err = conn.WriteJSON(message{
 		Action: "yourId",
 		Data:   id,
-		Date:   time.Now(),
 	})
 	if err != nil {
 		logErr(err)
@@ -339,7 +331,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 							"OldId": oldId,
 							"NewId": id,
 						},
-						Date: time.Now(),
 					}
 					jsonBytes, err = json.Marshal(oldIdMessage)
 					if err != nil {
@@ -360,10 +351,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func getAllLocations() message {
-	clients := getAllClients()
-
 	locations := make([]location, 0)
-	for _, c := range clients {
+	for _, c := range getAllClients() {
 		c.mutex.RLock()
 		if c.location.Latlng != nil {
 			locations = append(locations, c.location)
@@ -374,30 +363,22 @@ func getAllLocations() message {
 	return message{
 		Action: "allLocations",
 		Data:   &locations,
-		Date:   time.Now(),
 	}
 }
 
 func sendLocationToAll(l location, except *string) {
-	clients := getAllClients()
-
-	for _, c := range clients {
-		c.enqueue <- l
+	for _, c := range getAllClients() {
+		if except != nil && c.id != *except {
+			c.enqueue <- l
+		}
 	}
 }
 
 func sendMessageToAll(bytes *[]byte, except *string) {
-	var clients []*client
-	idToConnMapMutex.RLock()
-	for id, c := range idToConnMap {
-		if except != nil && id != *except {
-			clients = append(clients, c)
+	for _, c := range getAllClients() {
+		if except != nil && c.id != *except {
+			go c.send(bytes)
 		}
-	}
-	idToConnMapMutex.RUnlock()
-
-	for _, c := range clients {
-		go c.send(bytes)
 	}
 }
 
