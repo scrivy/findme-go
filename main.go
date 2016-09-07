@@ -217,12 +217,21 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	id := <-getIdChan
+	err = conn.WriteJSON(message{
+		Action: "yourId",
+		Data:   id,
+		Date:   time.Now(),
+	})
+	if err != nil {
+		logErr(err)
+	}
+
 	err = websocket.WriteJSON(conn, getAllLocations())
 	if err != nil {
 		logErr(err)
 	}
 
-	id := <-getIdChan
 	c := client{
 		conn:          conn,
 		location:      location{Id: id},
@@ -312,8 +321,37 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				c.location = l
 				c.mutex.Unlock()
 				sendLocationToAll(l, &id)
+			case "oldId":
+				oldId, ok := m.Data.(string)
+				if !ok {
+					continue
+				}
+
+				idToConnMapMutex.Lock()
+				oldConn, ok := idToConnMap[oldId]
+				delete(idToConnMap, oldId)
+				idToConnMapMutex.Unlock()
+
+				if ok {
+					oldIdMessage := message{
+						Action: "oldId",
+						Data: map[string]string{
+							"OldId": oldId,
+							"NewId": id,
+						},
+						Date: time.Now(),
+					}
+					jsonBytes, err = json.Marshal(oldIdMessage)
+					if err != nil {
+						logErr(err)
+						continue
+					}
+					sendMessageToAll(&jsonBytes, &id)
+					oldConn.close()
+					log.Println("deleted oldId")
+				}
 			default:
-				log.Printf("m.Data: %+v\n", m.Data)
+				log.Printf("%s: %+v\n", m.Action, m.Data)
 			}
 		default:
 			log.Printf("messageType: %#v\n", messageType)
@@ -345,6 +383,21 @@ func sendLocationToAll(l location, except *string) {
 
 	for _, c := range clients {
 		c.enqueue <- l
+	}
+}
+
+func sendMessageToAll(bytes *[]byte, except *string) {
+	var clients []*client
+	idToConnMapMutex.RLock()
+	for id, c := range idToConnMap {
+		if except != nil && id != *except {
+			clients = append(clients, c)
+		}
+	}
+	idToConnMapMutex.RUnlock()
+
+	for _, c := range clients {
+		go c.send(bytes)
 	}
 }
 
