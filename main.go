@@ -210,16 +210,16 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	err = websocket.WriteJSON(conn, getAllLocations())
+	if err != nil {
+		logErr(err)
+	}
+
 	id := <-getIdChan
 	err = conn.WriteJSON(message{
 		Action: "yourId",
 		Data:   id,
 	})
-	if err != nil {
-		logErr(err)
-	}
-
-	err = websocket.WriteJSON(conn, getAllLocations())
 	if err != nil {
 		logErr(err)
 	}
