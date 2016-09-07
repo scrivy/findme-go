@@ -57,28 +57,18 @@ func main() {
 	rmOldWsConnsTicker := time.NewTicker(time.Duration(10) * time.Minute)
 	var lastCheck time.Time
 	var clients []*client
+	var lastRxMessage time.Time
 	for {
 		select {
 		case <-pingTicker.C:
-			clients = make([]*client, 0)
-			idToConnMapMutex.RLock()
-			for _, c := range idToConnMap {
-				clients = append(clients, c)
-			}
-			idToConnMapMutex.RUnlock()
+			clients = getAllClients()
 
 			for _, c := range clients {
 				go c.ping()
 			}
 		case <-rmOldWsConnsTicker.C:
-			clients = make([]*client, 0)
-			idToConnMapMutex.RLock()
-			for _, c := range idToConnMap {
-				clients = append(clients, c)
-			}
-			idToConnMapMutex.RUnlock()
+			clients = getAllClients()
 
-			var lastRxMessage time.Time
 			for _, c := range clients {
 				c.mutex.RLock()
 				lastRxMessage = c.lastRxMessage
@@ -332,12 +322,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func getAllLocations() message {
-	clients := make([]*client, 0)
-	idToConnMapMutex.RLock()
-	for _, c := range idToConnMap {
-		clients = append(clients, c)
-	}
-	idToConnMapMutex.RUnlock()
+	clients := getAllClients()
 
 	locations := make([]location, 0)
 	for _, c := range clients {
@@ -356,14 +341,7 @@ func getAllLocations() message {
 }
 
 func sendLocationToAll(l location, except *string) {
-	var clients []*client
-	idToConnMapMutex.RLock()
-	for id, c := range idToConnMap {
-		if except != nil && id != *except {
-			clients = append(clients, c)
-		}
-	}
-	idToConnMapMutex.RUnlock()
+	clients := getAllClients()
 
 	for _, c := range clients {
 		c.enqueue <- l
@@ -413,4 +391,16 @@ func getTiles(w http.ResponseWriter, r *http.Request) {
 func logErr(err error) {
 	log.Println(err)
 	debug.PrintStack()
+}
+
+func getAllClients() []*client {
+	clients := make([]*client, 0)
+	log.Println("idToConnMapMutex.RLock()")
+	idToConnMapMutex.RLock()
+	for _, c := range idToConnMap {
+		clients = append(clients, c)
+	}
+	idToConnMapMutex.RUnlock()
+	log.Println("idToConnMapMutex.RUnlock()")
+	return clients
 }
