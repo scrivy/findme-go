@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/md5"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -31,6 +30,8 @@ var (
 		WriteBufferSize: 1024,
 		CheckOrigin:     func(r *http.Request) bool { return true },
 	}
+	updatesMap   map[string]location = make(map[string]location)
+	updatesMutex sync.RWMutex
 )
 
 func main() {
@@ -55,6 +56,7 @@ func main() {
 
 	pingTicker := time.NewTicker(time.Duration(5) * time.Second)
 	rmOldWsConnsTicker := time.NewTicker(time.Duration(10) * time.Minute)
+	updatesTicker := time.NewTicker(time.Second)
 	var lastCheck time.Time
 	var lastRxMessage time.Time
 	for {
@@ -78,6 +80,10 @@ func main() {
 				}
 			}
 			lastCheck = time.Now()
+		case <-updatesTicker.C:
+			updatesMutex.Lock()
+			updatesMap = make(map[string]location)
+			updatesMutex.Unlock()
 		}
 	}
 }
@@ -100,8 +106,6 @@ type client struct {
 	mutex         sync.RWMutex
 	writingMutex  sync.Mutex
 	id            string
-	queue         map[string]location
-	enqueue       chan location
 	closeChan     chan bool
 	lastRxMessage time.Time
 }
@@ -119,16 +123,17 @@ func (c *client) send(m *[]byte) {
 		if err != nil {
 			switch err {
 			case websocket.ErrCloseSent:
-				c.close()
+				log.Println(err)
 			default:
 				if strings.Contains(err.Error(), "i/o timeout") {
 					log.Println(err)
 				} else if strings.Contains(err.Error(), "write: broken pipe") {
 					log.Println(err)
-				} else {
+				} else if strings.Contains(err.Error(), "use of closed network connection") {
 					logErr(err)
 				}
 			}
+			c.close()
 		}
 	}
 }
@@ -144,6 +149,8 @@ func (c *client) ping() {
 			case websocket.ErrCloseSent:
 			default:
 				if strings.Contains(err.Error(), "write: broken pipe") {
+					log.Println(err)
+				} else if strings.Contains(err.Error(), "use of closed network connection") {
 					log.Println(err)
 				} else {
 					logErr(err)
@@ -165,33 +172,6 @@ func (c *client) close() {
 		close(c.closeChan)
 		c.conn.Close()
 	}
-}
-
-func (c *client) flushQueue() {
-	c.mutex.Lock()
-	if !c.wsClosed {
-		var err error
-		var jsonBytes []byte
-		if len(c.queue) > 0 {
-			locations := []location{}
-			for _, l := range c.queue {
-				locations = append(locations, l)
-			}
-			jsonBytes, err = json.Marshal(message{
-				Action: "allLocations",
-				Data:   locations,
-			})
-			c.queue = make(map[string]location)
-		}
-		if err != nil {
-			logErr(err)
-			return
-		}
-		if binary.Size(jsonBytes) > 0 {
-			c.send(&jsonBytes)
-		}
-	}
-	c.mutex.Unlock()
 }
 
 func connPongHandler(c *client) func(string) error {
@@ -229,8 +209,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		location:      location{Id: id},
 		id:            id,
 		closeChan:     make(chan bool),
-		enqueue:       make(chan location),
-		queue:         make(map[string]location),
 		lastRxMessage: time.Now(),
 	}
 	conn.SetPongHandler(connPongHandler(&c))
@@ -241,14 +219,34 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	go func(c *client) {
 		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
+		var jsonBytes []byte
+		var locations []location
+		var err error
 		for {
 			select {
 			case <-ticker.C:
-				c.flushQueue()
-			case l := <-c.enqueue:
-				c.queue[l.Id] = l
+				locations = []location{}
+				updatesMutex.RLock()
+				if len(updatesMap) > 0 {
+					for _, l := range updatesMap {
+						locations = append(locations, l)
+					}
+				}
+				updatesMutex.RUnlock()
+				if len(locations) > 0 {
+					jsonBytes, err = json.Marshal(message{
+						Action: "allLocations",
+						Data:   locations,
+					})
+					if err != nil {
+						logErr(err)
+						continue
+					}
+					c.send(&jsonBytes)
+				}
+
 			case <-c.closeChan:
+				ticker.Stop()
 				return
 			}
 		}
@@ -312,7 +310,10 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				c.mutex.Lock()
 				c.location = l
 				c.mutex.Unlock()
-				sendLocationToAll(l, &id)
+
+				updatesMutex.Lock()
+				updatesMap[id] = l
+				updatesMutex.Unlock()
 			case "oldId":
 				oldId, ok := m.Data.(string)
 				if !ok {
@@ -363,14 +364,6 @@ func getAllLocations() message {
 	return message{
 		Action: "allLocations",
 		Data:   &locations,
-	}
-}
-
-func sendLocationToAll(l location, except *string) {
-	for _, c := range getAllClients() {
-		if except != nil && c.id != *except {
-			c.enqueue <- l
-		}
 	}
 }
 
@@ -429,12 +422,12 @@ func logErr(err error) {
 
 func getAllClients() []*client {
 	clients := make([]*client, 0)
-	log.Println("idToConnMapMutex.RLock()")
+	//	log.Println("idToConnMapMutex.RLock()")
 	idToConnMapMutex.RLock()
 	for _, c := range idToConnMap {
 		clients = append(clients, c)
 	}
 	idToConnMapMutex.RUnlock()
-	log.Println("idToConnMapMutex.RUnlock()")
+	//	log.Println("idToConnMapMutex.RUnlock()")
 	return clients
 }
