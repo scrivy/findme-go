@@ -237,7 +237,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			case <-ticker.C:
 				locations = []location{}
 				updatesMutex.RLock()
-				log.Printf("%v %s\n", len(updatesMap), c.id)
 				if len(updatesMap) > 0 {
 					for id, l := range updatesMap {
 						if id != c.id {
@@ -324,7 +323,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				c.mutex.Unlock()
 
 				getUpdate <- l
-				log.Println("update: " + c.id)
 			case "oldId":
 				oldId, ok := m.Data.(string)
 				if !ok {
