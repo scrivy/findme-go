@@ -32,6 +32,7 @@ var (
 	}
 	updatesMap   map[string]location = make(map[string]location)
 	updatesMutex sync.RWMutex
+	getUpdate    chan location = make(chan location)
 )
 
 func main() {
@@ -59,6 +60,9 @@ func main() {
 	updatesTicker := time.NewTicker(time.Second)
 	var lastCheck time.Time
 	var lastRxMessage time.Time
+
+	queuedUpdates := make(map[string]location)
+
 	for {
 		select {
 		case <-pingTicker.C:
@@ -83,7 +87,13 @@ func main() {
 		case <-updatesTicker.C:
 			updatesMutex.Lock()
 			updatesMap = make(map[string]location)
+			for k, v := range queuedUpdates {
+				updatesMap[k] = v
+			}
 			updatesMutex.Unlock()
+			queuedUpdates = make(map[string]location)
+		case l := <-getUpdate:
+			queuedUpdates[l.Id] = l
 		}
 	}
 }
@@ -227,9 +237,12 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			case <-ticker.C:
 				locations = []location{}
 				updatesMutex.RLock()
+				log.Printf("%v %s\n", len(updatesMap), c.id)
 				if len(updatesMap) > 0 {
-					for _, l := range updatesMap {
-						locations = append(locations, l)
+					for id, l := range updatesMap {
+						if id != c.id {
+							locations = append(locations, l)
+						}
 					}
 				}
 				updatesMutex.RUnlock()
@@ -244,7 +257,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 					}
 					c.send(&jsonBytes)
 				}
-
 			case <-c.closeChan:
 				ticker.Stop()
 				return
@@ -311,9 +323,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				c.location = l
 				c.mutex.Unlock()
 
-				updatesMutex.Lock()
-				updatesMap[id] = l
-				updatesMutex.Unlock()
+				getUpdate <- l
+				log.Println("update: " + c.id)
 			case "oldId":
 				oldId, ok := m.Data.(string)
 				if !ok {
