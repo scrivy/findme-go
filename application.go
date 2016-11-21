@@ -105,7 +105,7 @@ type message struct {
 type location struct {
 	Id       string    `json:"id"`
 	Latlng   []float64 `json:"latlng"`
-	Accuracy float64   `json:"accuracy"`
+	Accuracy int       `json:"accuracy"`
 }
 
 type client struct {
@@ -307,7 +307,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				if !ok {
 					continue
 				}
-				accuracy, ok := data["accuracy"].(float64)
+				accuracy, ok := data["accuracy"].(int)
 				if !ok {
 					continue
 				}
