@@ -4,24 +4,22 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
-	"os"
-	"regexp"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"./common"
+	"./tiles"
 )
 
 var (
-	xyzRegex         *regexp.Regexp     = regexp.MustCompile(`^\/tiles\/(\d+)\/(\d+)\/(\d+)\.png$`)
 	getIdChan        chan string        = make(chan string)
 	idToConnMap      map[string]*client = make(map[string]*client)
 	idToConnMapMutex sync.RWMutex
@@ -47,8 +45,9 @@ func main() {
 		}
 	}()
 
-	http.HandleFunc("/tiles/", getTiles)
+	http.HandleFunc("/tiles/", tiles.GetHandler)
 	http.HandleFunc("/ws", wsHandler)
+	http.HandleFunc("/update", updateLocation)
 	http.Handle("/", http.FileServer(http.Dir("frontend/public")))
 
 	go func() {
@@ -126,7 +125,7 @@ func (c *client) send(m *[]byte) {
 		defer c.writingMutex.Unlock()
 		err := c.conn.SetWriteDeadline(time.Now().Add(time.Duration(time.Second)))
 		if err != nil {
-			logErr(err)
+			common.LogErr(err)
 			return
 		}
 		err = c.conn.WriteMessage(websocket.TextMessage, *m)
@@ -140,7 +139,7 @@ func (c *client) send(m *[]byte) {
 				} else if strings.Contains(err.Error(), "write: broken pipe") {
 					log.Println(err)
 				} else if strings.Contains(err.Error(), "use of closed network connection") {
-					logErr(err)
+					common.LogErr(err)
 				}
 			}
 			c.close()
@@ -163,7 +162,7 @@ func (c *client) ping() {
 				} else if strings.Contains(err.Error(), "use of closed network connection") {
 					log.Println(err)
 				} else {
-					logErr(err)
+					common.LogErr(err)
 				}
 			}
 			c.close()
@@ -196,13 +195,13 @@ func connPongHandler(c *client) func(string) error {
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		logErr(err)
+		common.LogErr(err)
 		return
 	}
 
 	err = websocket.WriteJSON(conn, getAllLocations())
 	if err != nil {
-		logErr(err)
+		common.LogErr(err)
 	}
 
 	id := <-getIdChan
@@ -211,7 +210,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		Data:   id,
 	})
 	if err != nil {
-		logErr(err)
+		common.LogErr(err)
 	}
 
 	c := client{
@@ -224,7 +223,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	conn.SetPongHandler(connPongHandler(&c))
 	idToConnMapMutex.Lock()
 	idToConnMap[id] = &c
-	log.Printf("%d open websockets", len(idToConnMap))
+	log.Printf("%d open websockets, id: %s\n", len(idToConnMap), id)
 	idToConnMapMutex.Unlock()
 
 	go func(c *client) {
@@ -251,7 +250,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 						Data:   locations,
 					})
 					if err != nil {
-						logErr(err)
+						common.LogErr(err)
 						continue
 					}
 					c.send(&jsonBytes)
@@ -287,7 +286,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		case websocket.TextMessage:
 			jsonBytes, err = ioutil.ReadAll(r)
 			if err != nil {
-				logErr(err)
+				common.LogErr(err)
 				continue
 			}
 
@@ -344,7 +343,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 					}
 					jsonBytes, err = json.Marshal(oldIdMessage)
 					if err != nil {
-						logErr(err)
+						common.LogErr(err)
 						continue
 					}
 					sendMessageToAll(&jsonBytes, &id)
@@ -384,51 +383,6 @@ func sendMessageToAll(bytes *[]byte, except *string) {
 	}
 }
 
-func getTiles(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
-		http.Error(w, "Method not allowed", 405)
-		return
-	}
-
-	if !xyzRegex.MatchString(r.URL.Path) {
-		http.Error(w, "wrong format", 400)
-		return
-	}
-	xyz := xyzRegex.FindStringSubmatch(r.URL.Path)
-	xyzPath := "tiles/" + xyz[1] + "/" + xyz[2] + "/"
-	xyzFile := xyzPath + xyz[3] + ".png"
-
-	if _, err := os.Stat(xyzFile); os.IsNotExist(err) {
-		resp, err := http.Get("http://a.tile.thunderforest.com/transport/" + xyz[1] + "/" + xyz[2] + "/" + xyz[3] + ".png")
-		if err != nil {
-			logErr(err)
-			return
-		}
-		defer resp.Body.Close()
-		err = os.MkdirAll(xyzPath, 0755)
-		if err != nil {
-			logErr(err)
-			return
-		}
-		out, err := os.Create(xyzFile)
-		if err != nil {
-			logErr(err)
-			return
-		}
-		io.Copy(out, resp.Body)
-		out.Close()
-		log.Println("downloaded " + xyzFile)
-	}
-
-	w.Header().Set("Cache-Control", "max-age=86400")
-	http.ServeFile(w, r, xyzFile)
-}
-
-func logErr(err error) {
-	log.Println(err)
-	debug.PrintStack()
-}
-
 func getAllClients() []*client {
 	clients := make([]*client, 0)
 	//	log.Println("idToConnMapMutex.RLock()")
@@ -439,4 +393,37 @@ func getAllClients() []*client {
 	idToConnMapMutex.RUnlock()
 	//	log.Println("idToConnMapMutex.RUnlock()")
 	return clients
+}
+
+func updateLocation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, http.StatusText(405), 405)
+		return
+	}
+
+	if r.Header.Get("Content-Type") != "application/json" || r.ContentLength == 0 {
+		http.Error(w, "The content type must be application/json and contain a body", 400)
+		return
+	}
+
+	dec := json.NewDecoder(r.Body)
+	var loc location
+	err := dec.Decode(&loc)
+	if err != nil {
+		http.Error(w, "Error parsing json", 400)
+		return
+	}
+
+	idToConnMapMutex.RLock()
+	c, ok := idToConnMap[loc.Id]
+	idToConnMapMutex.RUnlock()
+
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	c.mutex.Lock()
+	c.location = loc
+	c.mutex.Unlock()
 }
