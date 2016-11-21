@@ -426,4 +426,6 @@ func updateLocation(w http.ResponseWriter, r *http.Request) {
 	c.mutex.Lock()
 	c.location = loc
 	c.mutex.Unlock()
+
+	getUpdate <- loc
 }
