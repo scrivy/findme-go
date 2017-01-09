@@ -119,7 +119,7 @@ type client struct {
 	lastRxMessage time.Time
 }
 
-func (c *client) send(m *[]byte) {
+func (c *client) send(m []byte) {
 	if !c.wsClosed {
 		c.writingMutex.Lock()
 		defer c.writingMutex.Unlock()
@@ -128,7 +128,7 @@ func (c *client) send(m *[]byte) {
 			common.LogErr(err)
 			return
 		}
-		err = c.conn.WriteMessage(websocket.TextMessage, *m)
+		err = c.conn.WriteMessage(websocket.TextMessage, m)
 		if err != nil {
 			switch err {
 			case websocket.ErrCloseSent:
@@ -253,7 +253,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 						common.LogErr(err)
 						continue
 					}
-					c.send(&jsonBytes)
+					c.send(jsonBytes)
 				}
 			case <-c.closeChan:
 				ticker.Stop()
@@ -346,7 +346,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 						common.LogErr(err)
 						continue
 					}
-					sendMessageToAll(&jsonBytes, &id)
+					sendMessageToAll(jsonBytes, &id)
 					oldConn.close()
 					log.Println("deleted oldId")
 				}
@@ -375,7 +375,7 @@ func getAllLocations() message {
 	}
 }
 
-func sendMessageToAll(bytes *[]byte, except *string) {
+func sendMessageToAll(bytes []byte, except *string) {
 	for _, c := range getAllClients() {
 		if except != nil && c.id != *except {
 			go c.send(bytes)
@@ -425,6 +425,7 @@ func updateLocation(w http.ResponseWriter, r *http.Request) {
 
 	c.mutex.Lock()
 	c.location = loc
+	c.lastRxMessage = time.Now()
 	c.mutex.Unlock()
 
 	getUpdate <- loc
